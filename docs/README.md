@@ -57,7 +57,12 @@
 <a href="" target="_blank" rel="noopener noreferrer"><img alt="Downloads" src="https://img.shields.io/github/downloads/SwingTheVine/Wplace-BlueMarble/total.svg"></a>
 <a href="" target="_blank" rel="noopener noreferrer"><img alt="Build" src="https://github.com/SwingTheVine/Wplace-BlueMarble/actions/workflows/build.yml/badge.svg"></a>
 <a href="" target="_blank" rel="noopener noreferrer"><img alt="CodeQL" src="https://github.com/SwingTheVine/Wplace-BlueMarble/actions/workflows/github-code-scanning/codeql/badge.svg"></a>
-
+<h2>Fork Info</h2>
+A vibe coded fork of Blue Marble that adds the missing feature to SEMI-automatically paint
+How to use:
+Enable Quick Paint, enter amount of pixels to reserve
+When you paint any pixel, it will prevent the pixel from being painted and instead paint the pixels that are incorrect in the template
+Extension will automatically detect the colors you have and current paint charge remaining (the current page charge will update after you reload the page after quick painting)
 <h2>Quick Guide</h2>
 <p>
   Press the arrows to reveal the option you want.
