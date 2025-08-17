@@ -47,8 +47,6 @@ export default class Template {
    * @since 0.65.4
    */
   async createTemplateTiles() {
-    console.log('Template coordinates:', this.coords);
-
     const shreadSize = 3; // Scale image factor for pixel art enhancement (must be odd)
     const bitmap = await createImageBitmap(this.file); // Create efficient bitmap from uploaded file
     const imageWidth = bitmap.width;
@@ -57,7 +55,7 @@ export default class Template {
     // Calculate total pixel count using standard width × height formula
     // TODO: Use non-transparent pixels instead of basic width times height
     const totalPixels = imageWidth * imageHeight;
-    console.log(`Template pixel analysis - Dimensions: ${imageWidth}×${imageHeight} = ${totalPixels.toLocaleString()} pixels`);
+    console.log(`%cBlue Marble%c: Template analysis - Dimensions: ${imageWidth}×${imageHeight} (${totalPixels.toLocaleString()} pixels)`, 'color: cornflowerblue;', '');
     
     // Store pixel count in instance property for access by template manager and UI components
     this.pixelCount = totalPixels;
@@ -77,11 +75,7 @@ export default class Template {
       // B. The top left corner of the current tile to the bottom right corner of the image
       const drawSizeY = Math.min(this.tileSize - (pixelY % this.tileSize), imageHeight - (pixelY - this.coords[3]));
 
-      console.log(`Math.min(${this.tileSize} - (${pixelY} % ${this.tileSize}), ${imageHeight} - (${pixelY - this.coords[3]}))`);
-
       for (let pixelX = this.coords[2]; pixelX < imageWidth + this.coords[2];) {
-
-        console.log(`Pixel X: ${pixelX}\nPixel Y: ${pixelY}`);
 
         // Draws the partial tile first, if any
         // This calculates the size based on which is smaller:
@@ -89,21 +83,13 @@ export default class Template {
         // B. The top left corner of the current tile to the bottom right corner of the image
         const drawSizeX = Math.min(this.tileSize - (pixelX % this.tileSize), imageWidth - (pixelX - this.coords[2]));
 
-        console.log(`Math.min(${this.tileSize} - (${pixelX} % ${this.tileSize}), ${imageWidth} - (${pixelX - this.coords[2]}))`);
-
-        console.log(`Draw Size X: ${drawSizeX}\nDraw Size Y: ${drawSizeY}`);
-
         // Change the canvas size and wipe the canvas
         const canvasWidth = drawSizeX * shreadSize;// + (pixelX % this.tileSize) * shreadSize;
         const canvasHeight = drawSizeY * shreadSize;// + (pixelY % this.tileSize) * shreadSize;
         canvas.width = canvasWidth;
         canvas.height = canvasHeight;
 
-        console.log(`Draw X: ${drawSizeX}\nDraw Y: ${drawSizeY}\nCanvas Width: ${canvasWidth}\nCanvas Height: ${canvasHeight}`);
-
         context.imageSmoothingEnabled = false; // Nearest neighbor
-
-        console.log(`Getting X ${pixelX}-${pixelX + drawSizeX}\nGetting Y ${pixelY}-${pixelY + drawSizeY}`);
 
         // Draws the template segment on this tile segment
         context.clearRect(0, 0, canvasWidth, canvasHeight); // Clear any previous drawing (only runs when canvas size does not change)
@@ -118,11 +104,6 @@ export default class Template {
           drawSizeX * shreadSize, // X width to draw at
           drawSizeY * shreadSize // Y height to draw at
         ); // Coordinates and size of draw area of source image, then canvas
-
-        // const final = await canvas.convertToBlob({ type: 'image/png' });
-        // const url = URL.createObjectURL(final); // Creates a blob URL
-        // window.open(url, '_blank'); // Opens a new tab with blob
-        // setTimeout(() => URL.revokeObjectURL(url), 60000); // Destroys the blob 1 minute later
 
         const imageData = context.getImageData(0, 0, canvasWidth, canvasHeight); // Data of the image on the canvas
 
@@ -150,8 +131,6 @@ export default class Template {
           }
         }
 
-        console.log(`Shreaded pixels for ${pixelX}, ${pixelY}`, imageData);
-
         context.putImageData(imageData, 0, 0);
 
         // Creates the "0000,0000,000,000" key name
@@ -170,16 +149,12 @@ export default class Template {
         const canvasBufferBytes = Array.from(new Uint8Array(canvasBuffer));
         templateTilesBuffers[templateTileName] = uint8ToBase64(canvasBufferBytes); // Stores the buffer
 
-        console.log(templateTiles);
-
         pixelX += drawSizeX;
       }
 
       pixelY += drawSizeY;
     }
 
-    console.log('Template Tiles: ', templateTiles);
-    console.log('Template Tiles Buffers: ', templateTilesBuffers);
     return { templateTiles, templateTilesBuffers };
   }
 }

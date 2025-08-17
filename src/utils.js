@@ -1,5 +1,3 @@
-
-
 /** Sanitizes HTML to display as plain-text.
  * This prevents some Cross Site Scripting (XSS).
  * This is handy when you are displaying user-made data, and you *must* use innerHTML.
@@ -125,6 +123,229 @@ export function base64ToUint8(base64) {
     array[i] = binary.charCodeAt(i);
   }
   return array;
+}
+
+// --- Start of Color Conversion and CIEDE2000 Implementation ---
+
+// Optimization: Pre-calculate constants used in CIEDE2000
+const K_L = 1, K_C = 1, K_H = 1;
+const DEG_TO_RAD = Math.PI / 180;
+const RAD_TO_DEG = 180 / Math.PI;
+const POW25_7 = Math.pow(25, 7);
+
+/**
+ * Converts an RGB color value to the CIE XYZ color space.
+ * @param {number} r - Red component (0-255).
+ * @param {number} g - Green component (0-255).
+ * @param {number} b - Blue component (0-255).
+ * @returns {{x: number, y: number, z: number}} The color in XYZ space.
+ */
+function rgbToXyz(r, g, b) {
+    r /= 255;
+    g /= 255;
+    b /= 255;
+
+    r = r > 0.04045 ? Math.pow((r + 0.055) / 1.055, 2.4) : r / 12.92;
+    g = g > 0.04045 ? Math.pow((g + 0.055) / 1.055, 2.4) : g / 12.92;
+    b = b > 0.04045 ? Math.pow((b + 0.055) / 1.055, 2.4) : b / 12.92;
+
+    r *= 100;
+    g *= 100;
+    b *= 100;
+
+    return {
+        x: r * 0.4124564 + g * 0.3575761 + b * 0.1804375,
+        y: r * 0.2126729 + g * 0.7151522 + b * 0.0721750,
+        z: r * 0.0193339 + g * 0.1191920 + b * 0.9503041
+    };
+}
+
+/**
+ * Converts a color from CIE XYZ to CIE LAB color space.
+ * @param {number} x - X component.
+ * @param {number} y - Y component.
+ * @param {number} z - Z component.
+ * @returns {{l: number, a: number, b: number}} The color in LAB space.
+ */
+function xyzToLab(x, y, z) {
+    // Using D65 reference white
+    let refX = 95.047;
+    let refY = 100.000;
+    let refZ = 108.883;
+
+    x /= refX;
+    y /= refY;
+    z /= refZ;
+
+    x = x > 0.008856 ? Math.pow(x, 1 / 3) : (7.787 * x) + (16 / 116);
+    y = y > 0.008856 ? Math.pow(y, 1 / 3) : (7.787 * y) + (16 / 116);
+    z = z > 0.008856 ? Math.pow(z, 1 / 3) : (7.787 * z) + (16 / 116);
+
+    return {
+        l: (116 * y) - 16,
+        a: 500 * (x - y),
+        b: 200 * (y - z)
+    };
+}
+
+/**
+ * Convenience function to convert RGB to LAB.
+ * @param {number} r - Red component (0-255).
+ * @param {number} g - Green component (0-255).
+ * @param {number} b - Blue component (0-255).
+ * @returns {{l: number, a: number, b: number}} The color in LAB space.
+ */
+function rgbToLab(r, g, b) {
+    const { x, y, z } = rgbToXyz(r, g, b);
+    return xyzToLab(x, y, z);
+}
+
+/**
+ * Calculates the CIEDE2000 color difference between two LAB colors.
+ * Implementation based on the formula provided by Gaurav Sharma.
+ * @param {{l: number, a: number, b: number}} lab1
+ * @param {{l: number, a: number, b: number}} lab2
+ * @returns {number} The delta E (ΔE*) value.
+ */
+function ciede2000(lab1, lab2) {
+    const { l: l1, a: a1, b: b1 } = lab1;
+    const { l: l2, a: a2, b: b2 } = lab2;
+
+    const c1 = Math.sqrt(a1 * a1 + b1 * b1);
+    const c2 = Math.sqrt(a2 * a2 + b2 * b2);
+    const cBar = (c1 + c2) / 2;
+
+    const g = 0.5 * (1 - Math.sqrt(Math.pow(cBar, 7) / (Math.pow(cBar, 7) + POW25_7)));
+
+    const a1Prime = (1 + g) * a1;
+    const a2Prime = (1 + g) * a2;
+
+    const c1Prime = Math.sqrt(a1Prime * a1Prime + b1 * b1);
+    const c2Prime = Math.sqrt(a2Prime * a2Prime + b2 * b2);
+
+    let h1Prime = (Math.atan2(b1, a1Prime) * RAD_TO_DEG);
+    if (h1Prime < 0) h1Prime += 360;
+
+    let h2Prime = (Math.atan2(b2, a2Prime) * RAD_TO_DEG);
+    if (h2Prime < 0) h2Prime += 360;
+
+    const deltaLPrime = l2 - l1;
+    const deltaCPrime = c2Prime - c1Prime;
+
+    let deltaHPrime;
+    if (c1Prime * c2Prime === 0) {
+        deltaHPrime = 0;
+    } else {
+        const hDiff = h2Prime - h1Prime;
+        if (Math.abs(hDiff) <= 180) {
+            deltaHPrime = hDiff;
+        } else if (hDiff > 180) {
+            deltaHPrime = hDiff - 360;
+        } else {
+            deltaHPrime = hDiff + 360;
+        }
+    }
+
+    deltaHPrime = 2 * Math.sqrt(c1Prime * c2Prime) * Math.sin((deltaHPrime * DEG_TO_RAD) / 2);
+
+    const lBarPrime = (l1 + l2) / 2;
+    const cBarPrime = (c1Prime + c2Prime) / 2;
+
+    let hBarPrime;
+    if (c1Prime * c2Prime === 0) {
+        hBarPrime = h1Prime + h2Prime;
+    } else {
+        const hSum = h1Prime + h2Prime;
+        if (Math.abs(h1Prime - h2Prime) <= 180) {
+            hBarPrime = hSum / 2;
+        } else if (hSum < 360) {
+            hBarPrime = (hSum + 360) / 2;
+        } else {
+            hBarPrime = (hSum - 360) / 2;
+        }
+    }
+
+    const t = 1 - 0.17 * Math.cos((hBarPrime - 30) * DEG_TO_RAD) +
+                0.24 * Math.cos((2 * hBarPrime) * DEG_TO_RAD) +
+                0.32 * Math.cos((3 * hBarPrime + 6) * DEG_TO_RAD) -
+                0.20 * Math.cos((4 * hBarPrime - 63) * DEG_TO_RAD);
+
+    const deltaTheta = 30 * Math.exp(-Math.pow((hBarPrime - 275) / 25, 2));
+    const rC = 2 * Math.sqrt(Math.pow(cBarPrime, 7) / (Math.pow(cBarPrime, 7) + POW25_7));
+    const sL = 1 + (0.015 * Math.pow(lBarPrime - 50, 2)) / Math.sqrt(20 + Math.pow(lBarPrime - 50, 2));
+    const sC = 1 + 0.045 * cBarPrime;
+    const sH = 1 + 0.015 * cBarPrime * t;
+    const rT = -Math.sin((2 * deltaTheta) * DEG_TO_RAD) * rC;
+
+    const termL = deltaLPrime / (K_L * sL);
+    const termC = deltaCPrime / (K_C * sC);
+    const termH = deltaHPrime / (K_H * sH);
+
+    return Math.sqrt(termL * termL + termC * termC + termH * termH + rT * termC * termH);
+}
+
+// --- End of Color Conversion and CIEDE2000 Implementation ---
+
+/**
+ * Calculates the perceptual color difference between two RGB colors using the CIEDE2000 formula.
+ * The result is scaled to be used in the priority calculation.
+ * @param {{r: number, g: number, b: number}} rgb1 - The first RGB color.
+ * @param {{r: number, g: number, b: number}} rgb2 - The second RGB color.
+ * @returns {number} A scaled value representing the perceptual difference.
+ */
+export function calculateColorDifference(rgb1, rgb2) {
+    const lab1 = rgbToLab(rgb1.r, rgb1.g, rgb1.b);
+    const lab2 = rgbToLab(rgb2.r, rgb2.g, rgb2.b);
+    const deltaE = ciede2000(lab1, lab2);
+    // Scale deltaE (typically 0-100) to be a significant factor in the priority score.
+    return deltaE * 5000;
+}
+
+// Cache for RGB versions of the color palette for performance
+let colorpaletteRGB = null;
+
+/**
+ * Initializes the color palette cache to avoid repeated calculations.
+ */
+function initializePalettes() {
+    if (!colorpaletteRGB) {
+        colorpaletteRGB = colorpalette.map(color => {
+            if (color.name === "Transparent") return null;
+            return color.rgb;
+        });
+    }
+}
+
+/**
+ * Finds the index of the closest color in the palette to the given RGB color using simple Euclidean distance in RGB space.
+ * This is faster but less perceptually accurate than CIEDE2000.
+ * @param {{r: number, g: number, b: number}} rgb - The RGB color to match.
+ * @returns {number} The index (ID) of the closest color in the color palette.
+ * @since 0.83.0 (Modified)
+ */
+export function findClosestColor(rgb) {
+  initializePalettes();
+  
+  let minDistanceSq = Infinity;
+  let closestColorIndex = -1;
+
+  colorpaletteRGB.forEach((paletteRgb, index) => {
+    // Skip the "Transparent" color at index 0
+    if (index === 0) return;
+
+    const dr = rgb.r - paletteRgb[0];
+    const dg = rgb.g - paletteRgb[1];
+    const db = rgb.b - paletteRgb[2];
+    
+    const distanceSq = dr * dr + dg * dg + db * db;
+
+    if (distanceSq < minDistanceSq) {
+      minDistanceSq = distanceSq;
+      closestColorIndex = index;
+    }
+  });
+
+  return closestColorIndex;
 }
 
 /** The color palette used by wplace.live

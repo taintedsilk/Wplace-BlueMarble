@@ -680,8 +680,8 @@ export default class Overlay {
    * @since 0.58.4
    */
   handleDisplayStatus(text) {
-    const consoleInfo = console.info; // Creates a copy of the console.info function
-    consoleInfo(`${this.name}: ${text}`); // Outputs something like "ScriptName: text" as an info message to the console
+    // Use the standard styled log for consistency.
+    console.log(`%cBlue Marble%c: ${text}`, 'color: cornflowerblue;', '');
     this.updateInnerHTML(this.outputStatusId, 'Status: ' + text, true); // Update output Status box
   }
 
@@ -692,8 +692,8 @@ export default class Overlay {
    * @since 0.41.6
    */
   handleDisplayError(text) {
-    const consoleError = console.error; // Creates a copy of the console.error function
-    consoleError(`${this.name}: ${text}`); // Outputs something like "ScriptName: text" as an error message to the console
+    // Use the standard styled log for errors for consistency and better visibility.
+    console.error(`%cBlue Marble%c: ${text}`, 'color: cornflowerblue;', '');
     this.updateInnerHTML(this.outputStatusId, 'Error: ' + text, true); // Update output Status box
   }
 }

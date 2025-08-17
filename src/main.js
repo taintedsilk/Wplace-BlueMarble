@@ -6,7 +6,7 @@ import Overlay from './Overlay.js';
 import Observers from './observers.js';
 import ApiManager from './apiManager.js';
 import TemplateManager from './templateManager.js';
-import { consoleLog, consoleWarn } from './utils.js';
+import { consoleLog, consoleWarn, colorpalette } from './utils.js';
 
 const name = GM_info.script.name.toString(); // Name of userscript
 const version = GM_info.script.version.toString(); // Version of userscript
@@ -26,137 +26,114 @@ function inject(callback) {
     script.remove();
 }
 
+// --- In main.js ---
+
 /** What code to execute instantly in the client (webpage) to spy on fetch calls.
  * This code will execute outside of TamperMonkey's sandbox.
  * @since 0.11.15
  */
 inject(() => {
 
-  const script = document.currentScript; // Gets the current script HTML Script Element
-  const name = script?.getAttribute('bm-name') || 'Blue Marble'; // Gets the name value that was passed in. Defaults to "Blue Marble" if nothing was found
-  const consoleStyle = script?.getAttribute('bm-cStyle') || ''; // Gets the console style value that was passed in. Defaults to no styling if nothing was found
-  const fetchedBlobQueue = new Map(); // Blobs being processed
+  const script = document.currentScript;
+  const name = script?.getAttribute('bm-name') || 'Blue Marble';
+  const consoleStyle = script?.getAttribute('bm-cStyle') || '';
+  const fetchedBlobQueue = new Map();
 
+  // Listener for PROCESSED blobs from the userscript
   window.addEventListener('message', (event) => {
-    const { source, endpoint, blobID, blobData, blink } = event.data;
-
-    const elapsed = Date.now() - blink;
-
-    // Since this code does not run in the userscript, we can't use consoleLog().
-    console.groupCollapsed(`%c${name}%c: ${fetchedBlobQueue.size} Recieved IMAGE message about blob "${blobID}"`, consoleStyle, '');
-    console.log(`Blob fetch took %c${String(Math.floor(elapsed/60000)).padStart(2,'0')}:${String(Math.floor(elapsed/1000) % 60).padStart(2,'0')}.${String(elapsed % 1000).padStart(3,'0')}%c MM:SS.mmm`, consoleStyle, '');
-    console.log(fetchedBlobQueue);
-    console.groupEnd();
-
-    // The modified blob won't have an endpoint, so we ignore any message without one.
-    if ((source == 'blue-marble') && !!blobID && !!blobData && !endpoint) {
-
-      const callback = fetchedBlobQueue.get(blobID); // Retrieves the blob based on the UUID
-
-      // If the blobID is a valid function...
+    const data = event['data'];
+    if (data && data['source'] === 'blue-marble' && data['blobID'] && !data['endpoint']) {
+      const callback = fetchedBlobQueue.get(data['blobID']);
       if (typeof callback === 'function') {
-
-        callback(blobData); // ...Retrieve the blob data from the blobID function
+        callback(data['blobData']); // Resolve the promise with the new blob
       } else {
-        // ...else the blobID is unexpected. We don't know what it is, but we know for sure it is not a blob. This means we ignore it.
-
-        consoleWarn(`%c${name}%c: Attempted to retrieve a blob (%s) from queue, but the blobID was not a function! Skipping...`, consoleStyle, '', blobID);
+        console.warn(`%cBlue Marble%c: [INJECT] Could not find callback for blobID: ${data['blobID']}`, 'color: cornflowerblue;', '');
       }
-
-      fetchedBlobQueue.delete(blobID); // Delete the blob from the queue, because we don't need to process it again
+      fetchedBlobQueue.delete(data['blobID']);
     }
   });
 
-  // Spys on "spontaneous" fetch requests made by the client
-  const originalFetch = window.fetch; // Saves a copy of the original fetch
+  const originalFetch = window.fetch;
 
-  // Overrides fetch
+  // Overridden fetch function
   window.fetch = async function(...args) {
+    const request = new Request(args[0], args[1]);
+    
+    const isQuickPaintEnabled = localStorage.getItem('bm-quick-paint-enabled') === 'true';
 
-    const response = await originalFetch.apply(this, args); // Sends a fetch
-    const cloned = response.clone(); // Makes a copy of the response
+    if (isQuickPaintEnabled && request.method === 'POST' && request.url.includes('/s0/pixel/')) {
+        try {
+            const clonedRequest = request.clone();
+            const body = await clonedRequest.json();
 
-    // Retrieves the endpoint name. Unknown endpoint = "ignore"
-    const endpointName = ((args[0] instanceof Request) ? args[0]?.url : args[0]) || 'ignore';
+            if (body && body['t']) {
+                console.log(`%cBlue Marble%c: [Quick Paint] Valid paint token found! Forwarding to userscript.`, 'color: cornflowerblue;', '');
+                
+                window.postMessage({
+                    'source': 'blue-marble',
+                    'action': 'executeQuickPaint',
+                    'token': body['t']
+                }, '*');
 
-    // Check Content-Type to only process JSON
-    const contentType = cloned.headers.get('content-type') || '';
-    if (contentType.includes('application/json')) {
-
-
-      // Since this code does not run in the userscript, we can't use consoleLog().
-      console.log(`%c${name}%c: Sending JSON message about endpoint "${endpointName}"`, consoleStyle, '');
-
-      // Sends a message about the endpoint it spied on
-      cloned.json()
-        .then(jsonData => {
-          window.postMessage({
-            source: 'blue-marble',
-            endpoint: endpointName,
-            jsonData: jsonData
-          }, '*');
-        })
-        .catch(err => {
-          console.error(`%c${name}%c: Failed to parse JSON: `, consoleStyle, '', err);
-        });
-    } else if (contentType.includes('image/') && (!endpointName.includes('openfreemap') && !endpointName.includes('maps'))) {
-      // Fetch custom for all images but opensourcemap
-
-      const blink = Date.now(); // Current time
-
-      const blob = await cloned.blob(); // The original blob
-
-      // Since this code does not run in the userscript, we can't use consoleLog().
-      console.log(`%c${name}%c: ${fetchedBlobQueue.size} Sending IMAGE message about endpoint "${endpointName}"`, consoleStyle, '');
-
-      // Returns the manipulated blob
-      return new Promise((resolve) => {
-        const blobUUID = crypto.randomUUID(); // Generates a random UUID
-
-        // Store the blob while we wait for processing
-        fetchedBlobQueue.set(blobUUID, (blobProcessed) => {
-          // The response that triggers when the blob is finished processing
-
-          // Creates a new response
-          resolve(new Response(blobProcessed, {
-            headers: cloned.headers,
-            status: cloned.status,
-            statusText: cloned.statusText
-          }));
-
-          // Since this code does not run in the userscript, we can't use consoleLog().
-          console.log(`%c${name}%c: ${fetchedBlobQueue.size} Processed blob "${blobUUID}"`, consoleStyle, '');
-        });
-
-        window.postMessage({
-          source: 'blue-marble',
-          endpoint: endpointName,
-          blobID: blobUUID,
-          blobData: blob,
-          blink: blink
-        });
-      }).catch(exception => {
-        const elapsed = Date.now();
-        console.error(`%c${name}%c: Failed to Promise blob!`, consoleStyle, '');
-        console.groupCollapsed(`%c${name}%c: Details of failed blob Promise:`, consoleStyle, '');
-        console.log(`Endpoint: ${endpointName}\nThere are ${fetchedBlobQueue.size} blobs processing...\nBlink: ${blink.toLocaleString()}\nTime Since Blink: ${String(Math.floor(elapsed/60000)).padStart(2,'0')}:${String(Math.floor(elapsed/1000) % 60).padStart(2,'0')}.${String(elapsed % 1000).padStart(3,'0')} MM:SS.mmm`);
-        console.error(`Exception stack:`, exception);
-        console.groupEnd();
-      });
-
-      // cloned.blob().then(blob => {
-      //   window.postMessage({
-      //     source: 'blue-marble',
-      //     endpoint: endpointName,
-      //     blobData: blob
-      //   }, '*');
-      // });
+                return Promise.resolve(new Response(JSON.stringify({ success: true, message: "Quick Paint initiated." }), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' }
+                }));
+            }
+        } catch (e) {
+            // Silently fail if it's not the request we are looking for.
+        }
     }
 
-    return response; // Returns the original response
+    const response = await originalFetch.apply(this, [request]);
+    const clonedResponse = response.clone();
+    const endpointName = request.url;
+    const contentType = clonedResponse.headers.get('content-type') || '';
+
+    if (contentType.includes('application/json')) {
+      clonedResponse.json().then(jsonData => {
+        window.postMessage({
+          'source': 'blue-marble',
+          'endpoint': endpointName,
+          'jsonData': jsonData
+        }, '*');
+      }).catch(err => {
+        // Error is fine, not all json responses are valid
+      });
+    
+    } else if (contentType.includes('image/') && !endpointName.includes('openfreemap') && !endpointName.includes('maps')) {
+      return new Promise(async (resolve) => {
+        try {
+          const blob = await clonedResponse.blob();
+          const blobUUID = crypto.randomUUID();
+
+          fetchedBlobQueue.set(blobUUID, (processedBlob) => {
+            resolve(new Response(processedBlob, {
+              headers: clonedResponse.headers,
+              status: clonedResponse.status,
+              statusText: clonedResponse.statusText
+            }));
+          });
+
+          window.postMessage({
+            'source': 'blue-marble',
+            'endpoint': endpointName,
+            'blobID': blobUUID,
+            'blobData': blob,
+            'blink': Date.now()
+          });
+
+        } catch (e) {
+          resolve(response);
+        }
+      });
+    }
+
+    return response;
   };
 });
 
+// ... (The rest of the main.js file, constructors, etc., remains exactly the same) ...
 // Imports the CSS file from dist folder on github
 const cssOverlay = GM_getResourceText("CSS-BM-File");
 GM_addStyle(cssOverlay);
@@ -182,10 +159,20 @@ const apiManager = new ApiManager(templateManager); // Constructs a new ApiManag
 overlayMain.setApiManager(apiManager); // Sets the API manager
 
 const storageTemplates = JSON.parse(GM_getValue('bmTemplates', '{}'));
-console.log(storageTemplates);
 templateManager.importJSON(storageTemplates); // Loads the templates
 
 buildOverlayMain(); // Builds the main overlay
+
+const quickPaintCheckbox = document.querySelector('#bm-input-quick-paint');
+const paintCountInput = document.querySelector('#bm-input-paint-count');
+
+if (quickPaintCheckbox) {
+    quickPaintCheckbox.addEventListener('change', (event) => {
+        localStorage.setItem('bm-quick-paint-enabled', event.target.checked);
+    });
+    // Initialize from localStorage
+    quickPaintCheckbox.checked = localStorage.getItem('bm-quick-paint-enabled') === 'true';
+}
 
 overlayMain.handleDrag('#bm-overlay', '#bm-bar-drag'); // Creates dragging capability on the drag bar for dragging the overlay
 
@@ -248,23 +235,6 @@ function buildOverlayMain() {
       .addDiv({'id': 'bm-bar-drag'}).buildElement()
       .addImg({'alt': 'Blue Marble Icon - Click to minimize/maximize', 'src': 'https://raw.githubusercontent.com/SwingTheVine/Wplace-BlueMarble/main/dist/assets/Favicon.png', 'style': 'cursor: pointer;'}, 
         (instance, img) => {
-          /** Click event handler for overlay minimize/maximize functionality.
-           * 
-           * Toggles between two distinct UI states:
-           * 1. MINIMIZED STATE (60×76px):
-           *    - Shows only the Blue Marble icon and drag bar
-           *    - Hides all input fields, buttons, and status information
-           *    - Applies fixed dimensions for consistent appearance
-           *    - Repositions icon with 3px right offset for visual centering
-           * 
-           * 2. MAXIMIZED STATE (responsive):
-           *    - Restores full functionality with all UI elements
-           *    - Removes fixed dimensions to allow responsive behavior
-           *    - Resets icon positioning to default alignment
-           *    - Shows success message when returning to maximized state
-           * 
-           * @param {Event} event - The click event object (implicit)
-           */
           img.addEventListener('click', () => {
             isMinimized = !isMinimized; // Toggle the current state
 
@@ -278,8 +248,6 @@ function buildOverlayMain() {
             const disableButton = document.querySelector('#bm-button-disable');
             const coordInputs = document.querySelectorAll('#bm-contain-coords input');
             
-            // Pre-restore original dimensions when switching to maximized state
-            // This ensures smooth transition and prevents layout issues
             if (!isMinimized) {
               overlay.style.width = "auto";
               overlay.style.maxWidth = "300px";
@@ -287,158 +255,96 @@ function buildOverlayMain() {
               overlay.style.padding = "10px";
             }
             
-            // Define elements that should be hidden/shown during state transitions
-            // Each element is documented with its purpose for maintainability
             const elementsToToggle = [
-              '#bm-overlay h1',                    // Main title "Blue Marble"
-              '#bm-contain-userinfo',              // User information section (username, droplets, level)
-              '#bm-overlay hr',                    // Visual separator lines
-              '#bm-contain-automation > *:not(#bm-contain-coords)', // Automation section excluding coordinates
-              '#bm-input-file-template',           // Template file upload interface
-              '#bm-contain-buttons-action',        // Action buttons container
-              `#${instance.outputStatusId}`        // Status log textarea for user feedback
+              '#bm-overlay h1',
+              '#bm-contain-userinfo',
+              '#bm-overlay hr',
+              '#bm-contain-automation > *:not(#bm-contain-coords)',
+              '#bm-input-file-template',
+              '#bm-contain-buttons-action',
+              `#${instance.outputStatusId}`
             ];
             
-            // Apply visibility changes to all toggleable elements
             elementsToToggle.forEach(selector => {
               const elements = document.querySelectorAll(selector);
               elements.forEach(element => {
                 element.style.display = isMinimized ? 'none' : '';
               });
             });
-            // Handle coordinate container and button visibility based on state
             if (isMinimized) {
-              // ==================== MINIMIZED STATE CONFIGURATION ====================
-              // In minimized state, we hide ALL interactive elements except the icon and drag bar
-              // This creates a clean, unobtrusive interface that maintains only essential functionality
-              
-              // Hide coordinate input container completely
               if (coordsContainer) {
                 coordsContainer.style.display = 'none';
               }
-              
-              // Hide coordinate button (pin icon)
               if (coordsButton) {
                 coordsButton.style.display = 'none';
               }
-              
-              // Hide create template button
               if (createButton) {
                 createButton.style.display = 'none';
               }
-
-              // Hide enable templates button
               if (enableButton) {
                 enableButton.style.display = 'none';
               }
-
-              // Hide disable templates button
               if (disableButton) {
                 disableButton.style.display = 'none';
               }
-              
-              // Hide all coordinate input fields individually (failsafe)
               coordInputs.forEach(input => {
                 input.style.display = 'none';
               });
-              
-              // Apply fixed dimensions for consistent minimized appearance
-              // These dimensions were chosen to accommodate the icon while remaining compact
-              overlay.style.width = '60px';    // Fixed width for consistency
-              overlay.style.height = '76px';   // Fixed height (60px + 16px for better proportions)
-              overlay.style.maxWidth = '60px';  // Prevent expansion
-              overlay.style.minWidth = '60px';  // Prevent shrinking
-              overlay.style.padding = '8px';    // Comfortable padding around icon
-              
-              // Apply icon positioning for better visual centering in minimized state
-              // The 3px offset compensates for visual weight distribution
+              overlay.style.width = '60px';
+              overlay.style.height = '76px';
+              overlay.style.maxWidth = '60px';
+              overlay.style.minWidth = '60px';
+              overlay.style.padding = '8px';
               img.style.marginLeft = '3px';
-              
-              // Configure header layout for minimized state
               header.style.textAlign = 'center';
               header.style.margin = '0';
               header.style.marginBottom = '0';
-              
-              // Ensure drag bar remains visible and properly spaced
               if (dragBar) {
                 dragBar.style.display = '';
                 dragBar.style.marginBottom = '0.25em';
               }
             } else {
-              // ==================== MAXIMIZED STATE RESTORATION ====================
-              // In maximized state, we restore all elements to their default functionality
-              // This involves clearing all style overrides applied during minimization
-              
-              // Restore coordinate container to default state
               if (coordsContainer) {
-                coordsContainer.style.display = '';           // Show container
-                coordsContainer.style.flexDirection = '';     // Reset flex layout
-                coordsContainer.style.justifyContent = '';    // Reset alignment
-                coordsContainer.style.alignItems = '';        // Reset alignment
-                coordsContainer.style.gap = '';               // Reset spacing
-                coordsContainer.style.textAlign = '';         // Reset text alignment
-                coordsContainer.style.margin = '';            // Reset margins
+                coordsContainer.style.display = '';
+                coordsContainer.style.flexDirection = '';
+                coordsContainer.style.justifyContent = '';
+                coordsContainer.style.alignItems = '';
+                coordsContainer.style.gap = '';
+                coordsContainer.style.textAlign = '';
+                coordsContainer.style.margin = '';
               }
-              
-              // Restore coordinate button visibility
               if (coordsButton) {
                 coordsButton.style.display = '';
               }
-              
-              // Restore create button visibility and reset positioning
               if (createButton) {
                 createButton.style.display = '';
                 createButton.style.marginTop = '';
               }
-
-              // Restore enable button visibility and reset positioning
               if (enableButton) {
                 enableButton.style.display = '';
                 enableButton.style.marginTop = '';
               }
-
-              // Restore disable button visibility and reset positioning
               if (disableButton) {
                 disableButton.style.display = '';
                 disableButton.style.marginTop = '';
               }
-              
-              // Restore all coordinate input fields
               coordInputs.forEach(input => {
                 input.style.display = '';
               });
-              
-              // Reset icon positioning to default (remove minimized state offset)
               img.style.marginLeft = '';
-              
-              // Restore overlay to responsive dimensions
               overlay.style.padding = '10px';
-              
-              // Reset header styling to defaults
               header.style.textAlign = '';
               header.style.margin = '';
               header.style.marginBottom = '';
-              
-              // Reset drag bar spacing
               if (dragBar) {
                 dragBar.style.marginBottom = '0.5em';
               }
-              
-              // Remove all fixed dimensions to allow responsive behavior
-              // This ensures the overlay can adapt to content changes
               overlay.style.width = '';
               overlay.style.height = '';
             }
-            
-            // ==================== ACCESSIBILITY AND USER FEEDBACK ====================
-            // Update accessibility information for screen readers and tooltips
-            
-            // Update alt text to reflect current state for screen readers and tooltips
             img.alt = isMinimized ? 
               'Blue Marble Icon - Minimized (Click to maximize)' : 
               'Blue Marble Icon - Maximized (Click to minimize)';
-            
-            // No status message needed - state change is visually obvious to users
           });
         }
       ).buildElement()
@@ -456,17 +362,24 @@ function buildOverlayMain() {
     .addHr().buildElement()
 
     .addDiv({'id': 'bm-contain-automation'})
-      // .addCheckbox({'id': 'bm-input-stealth', 'textContent': 'Stealth', 'checked': true}).buildElement()
-      // .addButtonHelp({'title': 'Waits for the website to make requests, instead of sending requests.'}).buildElement()
-      // .addBr().buildElement()
-      // .addCheckbox({'id': 'bm-input-possessed', 'textContent': 'Possessed', 'checked': true}).buildElement()
-      // .addButtonHelp({'title': 'Controls the website as if it were possessed.'}).buildElement()
-      // .addBr().buildElement()
+      .addCheckbox({'id': 'bm-input-grief-clean', 'textContent': 'Grief-Clean', 'checked': false},
+        (instance, checkbox) => {
+          checkbox.addEventListener('change', () => {
+            instance.apiManager?.templateManager?.setAnalyzeTransparentPixels(checkbox.checked);
+          });
+        }
+      ).buildElement()
+      .addButtonHelp({'title': 'When enabled, transparent pixels in your template will be targeted for removal if they have been colored in on the canvas. Useful for clearing vandalism.'}).buildElement()
+      .addBr().buildElement()
+      .addCheckbox({'id': 'bm-input-quick-paint', 'textContent': 'Quick Paint', 'checked': false}).buildElement()
+      .addButtonHelp({'title': 'Automatically paints pixels from the template when you place a pixel.'}).buildElement()
+      .addInput({'type': 'number', 'id': 'bm-input-paint-count', 'placeholder': 'Reserve', 'min': 0, 'value': 0, 'style': 'width: 6ch; margin-left: 1ch;'}).buildElement()
+      .addBr().buildElement()
       .addDiv({'id': 'bm-contain-coords'})
         .addButton({'id': 'bm-button-coords', 'className': 'bm-help', 'style': 'margin-top: 0;', 'innerHTML': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 6"><circle cx="2" cy="2" r="2"></circle><path d="M2 6 L3.7 3 L0.3 3 Z"></path><circle cx="2" cy="2" r="0.7" fill="white"></circle></svg></svg>'},
           (instance, button) => {
             button.onclick = () => {
-              const coords = instance.apiManager?.coordsTilePixel; // Retrieves the coords from the API manager
+              const coords = instance.apiManager?.coordsTilePixel;
               if (!coords?.[0]) {
                 instance.handleDisplayError('Coordinates are malformed! Did you try clicking on the canvas first?');
                 return;
@@ -504,16 +417,9 @@ function buildOverlayMain() {
             const coordPxY = document.querySelector('#bm-input-py');
             if (!coordPxY.checkValidity()) {coordPxY.reportValidity(); instance.handleDisplayError('Coordinates are malformed! Did you try clicking on the canvas first?'); return;}
 
-            // Kills itself if there is no file
             if (!input?.files[0]) {instance.handleDisplayError(`No file selected!`); return;}
 
             templateManager.createTemplate(input.files[0], input.files[0]?.name.replace(/\.[^/.]+$/, ''), [Number(coordTlX.value), Number(coordTlY.value), Number(coordPxX.value), Number(coordPxY.value)]);
-
-            // console.log(`TCoords: ${apiManager.templateCoordsTilePixel}\nCoords: ${apiManager.coordsTilePixel}`);
-            // apiManager.templateCoordsTilePixel = apiManager.coordsTilePixel; // Update template coords
-            // console.log(`TCoords: ${apiManager.templateCoordsTilePixel}\nCoords: ${apiManager.coordsTilePixel}`);
-            // templateManager.setTemplateImage(input.files[0]);
-
             instance.handleDisplayStatus(`Drew to canvas!`);
           }
         }).buildElement()
@@ -527,9 +433,6 @@ function buildOverlayMain() {
       .addTextarea({'id': overlayMain.outputStatusId, 'placeholder': `Status: Sleeping...\nVersion: ${version}`, 'readOnly': true}).buildElement()
       .addDiv({'id': 'bm-contain-buttons-action'})
         .addDiv()
-          // .addButton({'id': 'bm-button-teleport', 'className': 'bm-help', 'textContent': '✈'}).buildElement()
-          // .addButton({'id': 'bm-button-favorite', 'className': 'bm-help', 'innerHTML': '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><polygon points="10,2 12,7.5 18,7.5 13.5,11.5 15.5,18 10,14 4.5,18 6.5,11.5 2,7.5 8,7.5" fill="white"></polygon></svg>'}).buildElement()
-          // .addButton({'id': 'bm-button-templates', 'className': 'bm-help', 'innerHTML': '🖌'}).buildElement()
           .addButton({'id': 'bm-button-convert', 'className': 'bm-help', 'innerHTML': '🎨', 'title': 'Template Color Converter'}, 
             (instance, button) => {
             button.addEventListener('click', () => {
@@ -537,6 +440,7 @@ function buildOverlayMain() {
             });
           }).buildElement()
         .buildElement()
+        .addSmall({'id': 'bm-pixel-queue-count', 'textContent': 'Queue: 0', 'style': 'margin-top: auto;'}).buildElement()
         .addSmall({'textContent': 'Made by SwingTheVine', 'style': 'margin-top: auto;'}).buildElement()
       .buildElement()
     .buildElement()
@@ -557,12 +461,17 @@ function buildOverlayTabTemplate() {
                 button.textContent = '↑';
                 isMinimized = true;
               }
-
-              
             }
           }
         ).buildElement()
       .buildElement()
     .buildElement()
   .buildOverlay();
+}
+if (paintCountInput) {
+    paintCountInput.addEventListener('input', (event) => {
+        localStorage.setItem('bm-quick-paint-count', event.target.value);
+    });
+    // Initialize from localStorage
+    paintCountInput.value = localStorage.getItem('bm-quick-paint-count') || '0';
 }

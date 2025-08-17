@@ -1,38 +1,11 @@
 import Template from "./Template";
-import { base64ToUint8, numberToEncoded } from "./utils";
+import { base64ToUint8, numberToEncoded, findClosestColor, calculateColorDifference, colorpalette } from "./utils";
 
 /** Manages the template system.
  * This class handles all external requests for template modification, creation, and analysis.
  * It serves as the central coordinator between template instances and the user interface.
  * @class TemplateManager
  * @since 0.55.8
- * @example
- * // JSON structure for a template
- * {
- *   "whoami": "BlueMarble",
- *   "scriptVersion": "1.13.0",
- *   "schemaVersion": "2.1.0",
- *   "templates": {
- *     "0 $Z": {
- *       "name": "My Template",
- *       "enabled": true,
- *       "tiles": {
- *         "1231,0047,183,593": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA",
- *         "1231,0048,183,000": "data:image/png;AAAFCAYAAACNbyblAAAAHElEQVQI12P4"
- *       }
- *     },
- *     "1 $Z": {
- *       "name": "My Template",
- *       "URL": "https://github.com/SwingTheVine/Wplace-BlueMarble/blob/main/dist/assets/Favicon.png",
- *       "URLType": "template",
- *       "enabled": false,
- *       "tiles": {
- *         "375,1846,276,188": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA",
- *         "376,1846,000,188": "data:image/png;AAAFCAYAAACNbyblAAAAHElEQVQI12P4"
- *       }
- *     }
- *   }
- * }
  */
 export default class TemplateManager {
 
@@ -52,55 +25,14 @@ export default class TemplateManager {
     this.drawMult = 3; // The enlarged size for each pixel. E.g. when "3", a 1x1 pixel becomes a 1x1 pixel inside a 3x3 area. MUST BE ODD
     
     // Template
-    this.canvasTemplate = null; // Our canvas
-    this.canvasTemplateZoomed = null; // The template when zoomed out
-    this.canvasTemplateID = 'bm-canvas'; // Our canvas ID
-    this.canvasMainID = 'div#map canvas.maplibregl-canvas'; // The selector for the main canvas
-    this.template = null; // The template image.
-    this.templateState = ''; // The state of the template ('blob', 'proccessing', 'template', etc.)
     this.templatesArray = []; // All Template instnaces currently loaded (Template)
     this.templatesJSON = null; // All templates currently loaded (JSON)
     this.templatesShouldBeDrawn = true; // Should ALL templates be drawn to the canvas?
-  }
+    this.analyzeTransparentPixels = false; // Should transparent pixels be targeted for analysis?
+    this.pixelQueue = JSON.parse(localStorage.getItem('bm-pixel-queue') || '[]'); // The queue of pixels to be painted
+    this.tileCache = new Map(); // Cache for tile data ArrayBuffers to detect changes and for on-demand analysis
+    this.templateColorCache = new Map(); // Cache for mapping template colors to the game palette to reduce calculations.
 
-  /** Retrieves the pixel art canvas.
-   * If the canvas has been updated/replaced, it retrieves the new one.
-   * @param {string} selector - The CSS selector to use to find the canvas.
-   * @returns {HTMLCanvasElement|null} The canvas as an HTML Canvas Element, or null if the canvas does not exist
-   * @since 0.58.3
-   * @deprecated Not in use since 0.63.25
-   */
-  /* @__PURE__ */getCanvas() {
-
-    // If the stored canvas is "fresh", return the stored canvas
-    if (document.body.contains(this.canvasTemplate)) {return this.canvasTemplate;}
-    // Else, the stored canvas is "stale", get the canvas again
-
-    // Attempt to find and destroy the "stale" canvas
-    document.getElementById(this.canvasTemplateID)?.remove(); 
-
-    const canvasMain = document.querySelector(this.canvasMainID);
-
-    const canvasTemplateNew = document.createElement('canvas');
-    canvasTemplateNew.id = this.canvasTemplateID;
-    canvasTemplateNew.className = 'maplibregl-canvas';
-    canvasTemplateNew.style.position = 'absolute';
-    canvasTemplateNew.style.top = '0';
-    canvasTemplateNew.style.left = '0';
-    canvasTemplateNew.style.height = `${canvasMain?.clientHeight * (window.devicePixelRatio || 1)}px`;
-    canvasTemplateNew.style.width = `${canvasMain?.clientWidth * (window.devicePixelRatio || 1)}px`;
-    canvasTemplateNew.height = canvasMain?.clientHeight * (window.devicePixelRatio || 1);
-    canvasTemplateNew.width = canvasMain?.clientWidth * (window.devicePixelRatio || 1);
-    canvasTemplateNew.style.zIndex = '8999';
-    canvasTemplateNew.style.pointerEvents = 'none';
-    canvasMain?.parentElement?.appendChild(canvasTemplateNew); // Append the newCanvas as a child of the parent of the main canvas
-    this.canvasTemplate = canvasTemplateNew; // Store the new canvas
-
-    window.addEventListener('move', this.onMove);
-    window.addEventListener('zoom', this.onZoom);
-    window.addEventListener('resize', this.onResize);
-
-    return this.canvasTemplate; // Return the new canvas
   }
 
   /** Creates the JSON object to store templates in
@@ -123,54 +55,37 @@ export default class TemplateManager {
    * @since 0.65.77
    */
   async createTemplate(blob, name, coords) {
-
-    // Creates the JSON object if it does not already exist
-    if (!this.templatesJSON) {this.templatesJSON = await this.createJSON(); console.log(`Creating JSON...`);}
+    if (!this.templatesJSON) {
+        this.templatesJSON = await this.createJSON();
+    }
 
     this.overlay.handleDisplayStatus(`Creating template at ${coords.join(', ')}...`);
 
-    // Creates a new template instance
     const template = new Template({
       displayName: name,
-      sortID: 0, // Object.keys(this.templatesJSON.templates).length || 0, // Uncomment this to enable multiple templates (1/2)
+      sortID: 0,
       authorID: numberToEncoded(this.userID || 0, this.encodingBase),
       file: blob,
       coords: coords
     });
-    //template.chunked = await template.createTemplateTiles(this.tileSize); // Chunks the tiles
-    const { templateTiles, templateTilesBuffers } = await template.createTemplateTiles(this.tileSize); // Chunks the tiles
-    template.chunked = templateTiles; // Stores the chunked tile bitmaps
+    
+    // --- FIX: Reverted this call to its original form to resolve the bug ---
+    const { templateTiles, templateTilesBuffers } = await template.createTemplateTiles(this.tileSize);
+    template.chunked = templateTiles;
 
-    // Appends a child into the templates object
-    // The child's name is the number of templates already in the list (sort order) plus the encoded player ID
-    this.templatesJSON.templates[`${template.sortID} ${template.authorID}`] = {
-      "name": template.displayName, // Display name of template
-      "coords": coords.join(', '), // The coords of the template
+    this.templatesJSON['templates'][`${template.sortID} ${template.authorID}`] = {
+      "name": template.displayName,
+      "coords": coords.join(', '),
       "enabled": true,
-      "tiles": templateTilesBuffers // Stores the chunked tile buffers
+      "tiles": templateTilesBuffers
     };
 
-    this.templatesArray = []; // Remove this to enable multiple templates (2/2)
-    this.templatesArray.push(template); // Pushes the Template object instance to the Template Array
+    this.templatesArray = [template]; // Replace existing templates
 
-    // ==================== PIXEL COUNT DISPLAY SYSTEM ====================
-    // Display pixel count statistics with internationalized number formatting
-    // This provides immediate feedback to users about template complexity and size
     const pixelCountFormatted = new Intl.NumberFormat().format(template.pixelCount);
     this.overlay.handleDisplayStatus(`Template created at ${coords.join(', ')}! Total pixels: ${pixelCountFormatted}`);
 
-    console.log(Object.keys(this.templatesJSON.templates).length);
-    console.log(this.templatesJSON);
-    console.log(this.templatesArray);
-    console.log(JSON.stringify(this.templatesJSON));
-
     await this.#storeTemplates();
-  }
-
-  /** Generates a {@link Template} class instance from the JSON object template
-   */
-  #loadTemplate() {
-
   }
 
   /** Stores the JSON object of the loaded templates into TamperMonkey (GreaseMonkey) storage.
@@ -179,144 +94,13 @@ export default class TemplateManager {
   async #storeTemplates() {
     GM.setValue('bmTemplates', JSON.stringify(this.templatesJSON));
   }
-
-  /** Deletes a template from the JSON object.
-   * Also delete's the corrosponding {@link Template} class instance
-   */
-  deleteTemplate() {
-
-  }
-
-  /** Disables the template from view
-   */
-  async disableTemplate() {
-
-    // Creates the JSON object if it does not already exist
-    if (!this.templatesJSON) {this.templatesJSON = await this.createJSON(); console.log(`Creating JSON...`);}
-
-
-  }
-
-  /** Draws all templates on the specified tile.
-   * This method handles the rendering of template overlays on individual tiles.
-   * @param {File} tileBlob - The pixels that are placed on a tile
-   * @param {Array<number>} tileCoords - The tile coordinates [x, y]
-   * @since 0.65.77
-   */
-  async drawTemplateOnTile(tileBlob, tileCoords) {
-
-    // Returns early if no templates should be drawn
-    if (!this.templatesShouldBeDrawn) {return tileBlob;}
-
-    const drawSize = this.tileSize * this.drawMult; // Calculate draw multiplier for scaling
-
-    // Format tile coordinates with proper padding for consistent lookup
-    tileCoords = tileCoords[0].toString().padStart(4, '0') + ',' + tileCoords[1].toString().padStart(4, '0');
-
-    console.log(`Searching for templates in tile: "${tileCoords}"`);
-
-    const templateArray = this.templatesArray; // Stores a copy for sorting
-    console.log(templateArray);
-
-    // Sorts the array of Template class instances. 0 = first = lowest draw priority
-    templateArray.sort((a, b) => {return a.sortID - b.sortID;});
-
-    console.log(templateArray);
-
-    // Retrieves the relavent template tile blobs
-    const templatesToDraw = templateArray
-      .map(template => {
-        const matchingTiles = Object.keys(template.chunked).filter(tile =>
-          tile.startsWith(tileCoords)
-        );
-
-        if (matchingTiles.length === 0) {return null;} // Return null when nothing is found
-
-        // Retrieves the blobs of the templates for this tile
-        const matchingTileBlobs = matchingTiles.map(tile => {
-
-          const coords = tile.split(','); // [x, y, x, y] Tile/pixel coordinates
-          
-          return {
-            bitmap: template.chunked[tile],
-            tileCoords: [coords[0], coords[1]],
-            pixelCoords: [coords[2], coords[3]]
-          }
-        });
-
-        return matchingTileBlobs?.[0];
-      })
-    .filter(Boolean);
-
-    console.log(templatesToDraw);
-
-    const templateCount = templatesToDraw?.length || 0; // Number of templates to draw on this tile
-    console.log(`templateCount = ${templateCount}`);
-
-    if (templateCount > 0) {
-      
-      // Calculate total pixel count for templates actively being displayed in this tile
-      const totalPixels = templateArray
-        .filter(template => {
-          // Filter templates to include only those with tiles matching current coordinates
-          // This ensures we count pixels only for templates actually being rendered
-          const matchingTiles = Object.keys(template.chunked).filter(tile =>
-            tile.startsWith(tileCoords)
-          );
-          return matchingTiles.length > 0;
-        })
-        .reduce((sum, template) => sum + (template.pixelCount || 0), 0);
-      
-      // Format pixel count with locale-appropriate thousands separators for better readability
-      // Examples: "1,234,567" (US), "1.234.567" (DE), "1 234 567" (FR)
-      const pixelCountFormatted = new Intl.NumberFormat().format(totalPixels);
-      
-      // Display status information about the templates being rendered
-      this.overlay.handleDisplayStatus(
-        `Displaying ${templateCount} template${templateCount == 1 ? '' : 's'}.\nTotal pixels: ${pixelCountFormatted}`
-      );
-    } else {
-      this.overlay.handleDisplayStatus(`Displaying ${templateCount} templates.`);
-    }
-    
-    const tileBitmap = await createImageBitmap(tileBlob);
-
-    const canvas = new OffscreenCanvas(drawSize, drawSize);
-    const context = canvas.getContext('2d');
-
-    context.imageSmoothingEnabled = false; // Nearest neighbor
-
-    // Tells the canvas to ignore anything outside of this area
-    context.beginPath();
-    context.rect(0, 0, drawSize, drawSize);
-    context.clip();
-
-    context.clearRect(0, 0, drawSize, drawSize); // Draws transparent background
-    context.drawImage(tileBitmap, 0, 0, drawSize, drawSize);
-
-    // For each template in this tile, draw them.
-    for (const template of templatesToDraw) {
-      console.log(`Template:`);
-      console.log(template);
-
-      // Draws the each template on the tile based on it's relative position
-      context.drawImage(template.bitmap, Number(template.pixelCoords[0]) * this.drawMult, Number(template.pixelCoords[1]) * this.drawMult);
-    }
-
-    return await canvas.convertToBlob({ type: 'image/png' });
-  }
-
+  
   /** Imports the JSON object, and appends it to any JSON object already loaded
    * @param {string} json - The JSON string to parse
    */
   importJSON(json) {
-
-    console.log(`Importing JSON...`);
-    console.log(json);
-
-    // If the passed in JSON is a Blue Marble template object...
-    if (json?.whoami == 'BlueMarble') {
-      this.#parseBlueMarble(json); // ...parse the template object as Blue Marble
+    if (json && json['whoami'] === 'BlueMarble') {
+      this.#parseBlueMarble(json);
     }
   }
 
@@ -325,70 +109,321 @@ export default class TemplateManager {
    * @since 0.72.13
    */
   async #parseBlueMarble(json) {
-
-    console.log(`Parsing BlueMarble...`);
-
-    const templates = json.templates;
-
-    console.log(`BlueMarble length: ${Object.keys(templates).length}`);
-
+    const templates = json['templates'];
     if (Object.keys(templates).length > 0) {
-
-      for (const template in templates) {
-
-        const templateKey = template;
-        const templateValue = templates[template];
-        console.log(templateKey);
-
-        if (templates.hasOwnProperty(template)) {
-
-          const templateKeyArray = templateKey.split(' '); // E.g., "0 $Z" -> ["0", "$Z"]
-          const sortID = Number(templateKeyArray?.[0]); // Sort ID of the template
-          const authorID = templateKeyArray?.[1] || '0'; // User ID of the person who exported the template
-          const displayName = templateValue.name || `Template ${sortID || ''}`; // Display name of the template
-          //const coords = templateValue?.coords?.split(',').map(Number); // "1,2,3,4" -> [1, 2, 3, 4]
-          const tilesbase64 = templateValue.tiles;
-          const templateTiles = {}; // Stores the template bitmap tiles for each tile.
+      for (const templateKey in templates) {
+        if (templates.hasOwnProperty(templateKey)) {
+          const templateValue = templates[templateKey];
+          const templateKeyArray = templateKey.split(' ');
+          const sortID = Number(templateKeyArray[0]);
+          const authorID = templateKeyArray[1] || '0';
+          const displayName = templateValue['name'] || `Template ${sortID || ''}`;
+          const tilesbase64 = templateValue['tiles'];
+          const templateTiles = {};
 
           for (const tile in tilesbase64) {
-            console.log(tile);
             if (tilesbase64.hasOwnProperty(tile)) {
               const encodedTemplateBase64 = tilesbase64[tile];
-              const templateUint8Array = base64ToUint8(encodedTemplateBase64); // Base 64 -> Uint8Array
-
-              const templateBlob = new Blob([templateUint8Array], { type: "image/png" }); // Uint8Array -> Blob
-              const templateBitmap = await createImageBitmap(templateBlob) // Blob -> Bitmap
-              templateTiles[tile] = templateBitmap;
+              const templateUint8Array = base64ToUint8(encodedTemplateBase64);
+              const templateBlob = new Blob([templateUint8Array], { type: "image/png" });
+              templateTiles[tile] = await createImageBitmap(templateBlob);
             }
           }
 
-          // Creates a new Template class instance
           const template = new Template({
             displayName: displayName,
-            sortID: sortID || this.templatesArray?.length || 0,
+            sortID: sortID || this.templatesArray.length || 0,
             authorID: authorID || '',
-            //coords: coords
           });
           template.chunked = templateTiles;
           this.templatesArray.push(template);
-          console.log(this.templatesArray);
-          console.log(`^^^ This ^^^`);
         }
       }
     }
   }
 
-  /** Parses the OSU! Place JSON object
+  /**
+   * Sets the state for analyzing transparent pixels.
+   * @param {boolean} value - True to enable targeting of transparent pixels, false otherwise.
+   * @since 0.83.0
    */
-  #parseOSU() {
-
+  setAnalyzeTransparentPixels(value) {
+    this.analyzeTransparentPixels = value;
+    this.overlay.handleDisplayStatus(`Grief-Clean mode ${value ? 'enabled' : 'disabled'}.`);
   }
 
-  /** Sets the `templatesShouldBeDrawn` boolean to a value.
-   * @param {boolean} value - The value to set the boolean to
-   * @since 0.73.7
+  /**
+   * MODIFIED: Analyzes all currently visible tiles to build the pixel queue on-demand.
+   * This function now completely overrides the existing pixel queue with a fresh analysis of visible tiles.
+   * @since MODIFIED
    */
-  setTemplatesShouldBeDrawn(value) {
-    this.templatesShouldBeDrawn = value;
+  async analyzeVisibleTiles() {
+    this.overlay.handleDisplayStatus('Analyzing visible tiles for quick paint...');
+    
+    // This new queue will contain all pixels that need painting from the visible tiles.
+    const newPixelQueue = [];
+
+    // Iterate through all the tiles currently visible and cached.
+    for (const [tileKey, tileBuffer] of this.tileCache.entries()) {
+        const tileCoords = tileKey.split(',').map(Number);
+        const tileBlob = new Blob([tileBuffer]);
+
+        // Find all template parts that apply to the current tile.
+        const templatesToDraw = this.templatesArray
+            .flatMap(template =>
+                Object.keys(template.chunked)
+                .filter(key => key.startsWith(tileCoords.map(c => c.toString().padStart(4, '0')).join(',')))
+                .map(key => {
+                    const coords = key.split(',');
+                    return {
+                        'bitmap': template.chunked[key],
+                        'pixelCoords': [coords[2], coords[3]]
+                    };
+                })
+            );
+
+        // If there are templates on this tile, analyze it for pixels to paint.
+        if (templatesToDraw.length > 0) {
+            const foundPixels = await this.analyzeTile(tileBlob, templatesToDraw, tileCoords);
+            // Add all the found pixels for this tile to our new queue.
+            newPixelQueue.push(...foundPixels);
+        }
+    }
+
+    // Replace the old pixel queue with the newly generated one.
+    // This fulfills the requirement to override the queue for updated tiles.
+    this.pixelQueue = newPixelQueue;
+    
+    // Update storage and UI with the new queue information.
+    this.updatePixelQueueAttribute();
+    this.updatePixelQueueCountUI();
+    this.overlay.handleDisplayStatus(`Analysis complete. ${this.pixelQueue.length} pixels in queue.`);
+  }
+
+  /**
+   * Analyzes a single tile and returns an array of pixels that need to be painted.
+   * @param {Blob} tileBlob - The original tile image blob from the game server.
+   * @param {Array<Object>} templatesToDraw - An array of template objects to be drawn on this tile.
+   * @param {Array<number>} tileCoords - The coordinates of the tile being analyzed, as [x, y].
+   * @returns {Promise<Array<Object>>} A promise that resolves to an array of pixel data objects for the queue.
+   * @since MODIFIED
+   */
+  async analyzeTile(tileBlob, templatesToDraw, tileCoords) {
+    if (templatesToDraw.length === 0) return [];
+
+    const drawSize = this.tileSize * this.drawMult;
+    
+    let minX = this.tileSize, minY = this.tileSize, maxX = 0, maxY = 0;
+
+    for (const template of templatesToDraw) {
+      const startX = Number(template['pixelCoords'][0]);
+      const startY = Number(template['pixelCoords'][1]);
+      const templateWidth = template['bitmap'].width / this.drawMult;
+      const templateHeight = template['bitmap'].height / this.drawMult;
+
+      minX = Math.min(minX, startX);
+      minY = Math.min(minY, startY);
+      maxX = Math.max(maxX, startX + templateWidth);
+      maxY = Math.max(maxY, startY + templateHeight);
+    }
+
+    const gameCanvas = new OffscreenCanvas(drawSize, drawSize);
+    const gameCtx = gameCanvas.getContext('2d');
+    const gameBitmap = await createImageBitmap(tileBlob);
+    gameCtx.drawImage(gameBitmap, 0, 0, drawSize, drawSize);
+    const gameImageData = gameCtx.getImageData(0, 0, drawSize, drawSize).data;
+
+    const templateCanvas = new OffscreenCanvas(drawSize, drawSize);
+    const templateCtx = templateCanvas.getContext('2d');
+    for (const template of templatesToDraw) {
+      templateCtx.drawImage(template['bitmap'], Number(template['pixelCoords'][0]) * this.drawMult, Number(template['pixelCoords'][1]) * this.drawMult);
+    }
+    const templateImageData = templateCtx.getImageData(0, 0, drawSize, drawSize).data;
+    
+    const newPixelsForQueue = [];
+    
+    const centerX = minX + (maxX - minX) / 2;
+    const centerY = minY + (maxY - minY) / 2;
+    const maxDist = Math.sqrt(Math.pow(maxX - centerX, 2) + Math.pow(maxY - centerY, 2));
+
+    for (let y = minY; y < maxY; y++) {
+      for (let x = minX; x < maxX; x++) {
+        const index = ((y * this.drawMult + 1) * drawSize + (x * this.drawMult + 1)) * 4;
+
+        const templateR = templateImageData[index], templateG = templateImageData[index + 1], templateB = templateImageData[index + 2], templateAlpha = templateImageData[index + 3];
+        const gameR = gameImageData[index], gameG = gameImageData[index + 1], gameB = gameImageData[index + 2], gameAlpha = gameImageData[index + 3];
+
+        let pixelData = null;
+
+        // Tier 1: Grief-Clean. Template is transparent, canvas has color.
+        if (this.analyzeTransparentPixels && templateAlpha < 128 && gameAlpha > 0) {
+            pixelData = {
+                'tileCoords': tileCoords,
+                'pixelCoords': [x, y],
+                'colorId': 0, // Paint "transparent" to erase
+                'priority': 2000000 // Highest priority
+            };
+        } 
+        // Tier 2 & 3: Standard Paint. Template has a color.
+        else if (templateAlpha > 128) {
+            const isTransparent = gameAlpha < 128;
+            
+            // --- OPTIMIZATION: Use a cache and a fast RGB check for converting template colors ---
+            const templateColorKey = (templateAlpha << 24) | (templateB << 16) | (templateG << 8) | templateR;
+            let targetColorId;
+
+            if (this.templateColorCache.has(templateColorKey)) {
+                targetColorId = this.templateColorCache.get(templateColorKey);
+            } else {
+                targetColorId = findClosestColor({ r: templateR, g: templateG, b: templateB });
+                this.templateColorCache.set(templateColorKey, targetColorId);
+            }
+            
+            let isWrongColor = false;
+
+            if (!isTransparent) {
+                // --- OPTIMIZATION: Use the fast RGB check for canvas colors as well ---
+                const currentColorId = findClosestColor({ r: gameR, g: gameG, b: gameB });
+                if (currentColorId !== targetColorId) {
+                    isWrongColor = true;
+                }
+            }
+
+            if (isTransparent || isWrongColor) {
+                const colorId = targetColorId;
+                
+                const distFromCenter = Math.sqrt(Math.pow(x - centerX, 2) + Math.pow(y - centerY, 2));
+                const normalizedDist = maxDist > 0 ? distFromCenter / maxDist : 0;
+                const centerBonus = (1 - normalizedDist) * 500000;
+
+                pixelData = {
+                    'tileCoords': tileCoords,
+                    'pixelCoords': [x, y],
+                    'colorId': colorId,
+                    'priority': 0
+                };
+
+                // Tier 2: Placing a pixel on a transparent spot.
+                if (isTransparent) {
+                    pixelData.priority = 1000000 + centerBonus;
+                } 
+                // Tier 3: Correcting an existing, but wrong, color.
+                else {
+                    // Perceptual difference is still used for *prioritization*
+                    const colorDiff = calculateColorDifference({ r: gameR, g: gameG, b: gameB }, { r: templateR, g: templateG, b: templateB });
+                    pixelData.priority = colorDiff + centerBonus;
+                }
+            }
+        }
+
+        if (pixelData) {
+            const toColorName = colorpalette[pixelData.colorId]?.name || 'Unknown';
+            let logMessage = '';
+
+            // Case 1: Grief-Clean
+            if (pixelData.colorId === 0) {
+                const fromColorId = findClosestColor({ r: gameR, g: gameG, b: gameB });
+                const fromColorName = colorpalette[fromColorId]?.name || `RGB(${gameR},${gameG},${gameB})`;
+                // logMessage = `Queueing [Grief-Clean] at [${x}, ${y}] on tile [${tileCoords.join(',')}]. Removing '${fromColorName}' (Priority: ${pixelData.priority.toFixed(0)}).`;
+            }
+            // Case 2 & 3: Standard Paint
+            else {
+                const isTransparent = gameAlpha < 128;
+                if (isTransparent) { // Painting on empty spot
+                    // logMessage = `Queueing [New Pixel] at [${x}, ${y}] on tile [${tileCoords.join(',')}]. Painting '${toColorName}' over transparent (Priority: ${pixelData.priority.toFixed(0)}).`;
+                } else { // Correcting wrong color
+                    const fromColorId = findClosestColor({ r: gameR, g: gameG, b: gameB });
+                    const fromColorName = colorpalette[fromColorId]?.name || `RGB(${gameR},${gameG},${gameB})`;
+                    // logMessage = `Queueing [Correction] at [${x}, ${y}] on tile [${tileCoords.join(',')}]. Changing '${fromColorName}' to '${toColorName}' (Priority: ${pixelData.priority.toFixed(0)}).`;
+                }
+            }
+            
+            if (logMessage) {
+                console.log(`%cBlue Marble%c: ${logMessage}`, 'color: cornflowerblue;', '');
+            }
+            newPixelsForQueue.push(pixelData);
+        }
+      }
+    }
+    
+    return newPixelsForQueue;
+  }
+
+  /**
+   * Saves the current pixel queue to localStorage for the injected script to access.
+   * @since 0.83.0
+   */
+  updatePixelQueueAttribute() {
+    localStorage.setItem('bm-pixel-queue', JSON.stringify(this.pixelQueue));
+  }
+
+  /**
+   * Updates the UI element to show the current number of pixels in the queue.
+   * @since 0.83.0
+   */
+  updatePixelQueueCountUI() {
+    const queueCountElement = document.querySelector('#bm-pixel-queue-count');
+    if (queueCountElement) {
+        queueCountElement.textContent = `Queue: ${this.pixelQueue.length}`;
+    }
+  }
+
+  /**
+   * Draws all templates on the specified tile.
+   * This is now a lightweight function that only handles rendering, not analysis.
+   * @param {File} tileBlob - The pixels that are placed on a tile
+   * @param {Array<number>} tileCoords - The tile coordinates [x, y]
+   * @returns {Promise<Blob>} A promise resolving to the modified tile Blob.
+   * @since MODIFIED
+   */
+  async drawTemplateOnTile(tileBlob, tileCoords) {
+    // Cache the latest version of the tile for on-demand analysis
+    const tileKey = tileCoords.join(',');
+    this.tileCache.set(tileKey, await tileBlob.arrayBuffer());
+
+    if (!this.templatesShouldBeDrawn) {
+        return tileBlob;
+    }
+    
+    const formattedTileCoords = tileCoords[0].toString().padStart(4, '0') + ',' + tileCoords[1].toString().padStart(4, '0');
+    const templatesToDraw = this.templatesArray
+      .flatMap(template => 
+        Object.keys(template.chunked)
+          .filter(tileKey => tileKey.startsWith(formattedTileCoords))
+          .map(tileKey => {
+            const coords = tileKey.split(',');
+            return {
+              'bitmap': template.chunked[tileKey],
+              'pixelCoords': [coords[2], coords[3]]
+            };
+          })
+      )
+      .sort((a, b) => (a.sortID || 0) - (b.sortID || 0));
+
+    if (templatesToDraw.length === 0) {
+      return tileBlob;
+    }
+
+    // Update UI without intensive calculations
+    const totalPixelsInView = this.templatesArray
+      .filter(template => Object.keys(template.chunked).some(tile => tile.startsWith(formattedTileCoords)))
+      .reduce((sum, template) => sum + (template.pixelCount || 0), 0);
+    const pixelCountFormatted = new Intl.NumberFormat().format(totalPixelsInView);
+    this.overlay.handleDisplayStatus(
+      `Displaying ${templatesToDraw.length} template${templatesToDraw.length === 1 ? '' : 's'}.\nTotal pixels: ${pixelCountFormatted}`
+    );
+
+    const drawSize = this.tileSize * this.drawMult;
+    const tileBitmap = await createImageBitmap(tileBlob);
+    const canvas = new OffscreenCanvas(drawSize, drawSize);
+    const context = canvas.getContext('2d');
+    context.imageSmoothingEnabled = false;
+    context.drawImage(tileBitmap, 0, 0, drawSize, drawSize);
+
+    for (const template of templatesToDraw) {
+      context.drawImage(template['bitmap'], Number(template['pixelCoords'][0]) * this.drawMult, Number(template['pixelCoords'][1]) * this.drawMult);
+    }
+    
+    return await canvas.convertToBlob({ type: 'image/png' });
   }
 }
