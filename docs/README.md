@@ -61,6 +61,7 @@
 A vibe coded fork of Blue Marble that adds the missing feature to SEMI-automatically paint
 
 How to use:
+
 Enable Quick Paint, enter amount of pixels to reserve
 
 When you paint any pixel, it will prevent the pixel from being painted and instead paint the pixels that are incorrect in the template
