@@ -1,8 +1,4 @@
-
-
-
-
-import { uint8ToBase64 } from "./utils";
+import { uint8ToBase64, findClosestColor, colorpalette } from "./utils";
 
 /** An instance of a template.
  * Handles all mathematics, manipulation, and analysis regarding a single template.
@@ -131,6 +127,22 @@ export default class Template {
               }
             } else if (x % shreadSize !== 1 || y % shreadSize !== 1) { // Otherwise only draw the middle pixel
               imageData.data[pixelIndex + 3] = 0; // Make the pixel transparent on the alpha channel
+            } else {
+              // This is a center pixel, palletize it.
+              const r = imageData.data[pixelIndex];
+              const g = imageData.data[pixelIndex + 1];
+              const b = imageData.data[pixelIndex + 2];
+              const a = imageData.data[pixelIndex + 3];
+
+              if (a > 128) { // If it's a visible pixel
+                  const closestColorId = findClosestColor({ r, g, b });
+                  const paletteRgb = colorpalette[closestColorId].rgb;
+
+                  // Update the pixel in the imageData to the palletized color
+                  imageData.data[pixelIndex] = paletteRgb[0];
+                  imageData.data[pixelIndex + 1] = paletteRgb[1];
+                  imageData.data[pixelIndex + 2] = paletteRgb[2];
+              }
             }
           }
         }

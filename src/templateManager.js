@@ -448,6 +448,7 @@ export default class TemplateManager {
 
               // If the game pixel is visible and its color already matches the template,
               // make the corresponding template pixel transparent so it doesn't get drawn.
+              // This is now a simple and fast RGB check because the template is pre-palletized.
               if (gAlpha > 128 && tR === gR && tG === gG && tB === gB) {
                 tData[tIdx + 3] = 0;
               }
