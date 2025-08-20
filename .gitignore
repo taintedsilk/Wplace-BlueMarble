@@ -398,3 +398,6 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+src/extract.py
+src/output.txt
+package-lock.json

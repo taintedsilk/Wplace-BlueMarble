@@ -288,17 +288,16 @@ function ciede2000(lab1, lab2) {
 
 /**
  * Calculates the perceptual color difference between two RGB colors using the CIEDE2000 formula.
- * The result is scaled to be used in the priority calculation.
  * @param {{r: number, g: number, b: number}} rgb1 - The first RGB color.
  * @param {{r: number, g: number, b: number}} rgb2 - The second RGB color.
- * @returns {number} A scaled value representing the perceptual difference.
+ * @returns {number} The raw deltaE value representing the perceptual difference.
  */
 export function calculateColorDifference(rgb1, rgb2) {
     const lab1 = rgbToLab(rgb1.r, rgb1.g, rgb1.b);
     const lab2 = rgbToLab(rgb2.r, rgb2.g, rgb2.b);
     const deltaE = ciede2000(lab1, lab2);
-    // Scale deltaE (typically 0-100) to be a significant factor in the priority score.
-    return deltaE * 5000;
+    // Return the raw deltaE value (typically 0-100).
+    return deltaE;
 }
 
 // Cache for RGB versions of the color palette for performance

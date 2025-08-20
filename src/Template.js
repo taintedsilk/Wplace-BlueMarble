@@ -1,3 +1,7 @@
+
+
+
+
 import { uint8ToBase64 } from "./utils";
 
 /** An instance of a template.
@@ -158,3 +162,10 @@ export default class Template {
     return { templateTiles, templateTilesBuffers };
   }
 }
+
+
+
+
+
+
+

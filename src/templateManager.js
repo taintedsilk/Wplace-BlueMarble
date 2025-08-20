@@ -10,14 +10,19 @@ import { base64ToUint8, numberToEncoded, findClosestColor, calculateColorDiffere
 export default class TemplateManager {
 
   /** The constructor for the {@link TemplateManager} class.
+   * @param {string} name
+   * @param {string} version
+   * @param {Overlay} overlay
+   * @param {AutoPainter} autoPainter
    * @since 0.55.8
    */
-  constructor(name, version, overlay) {
+  constructor(name, version, overlay, autoPainter) {
 
     // Meta
     this.name = name; // Name of userscript
     this.version = version; // Version of userscript
     this.overlay = overlay; // The main instance of the Overlay class
+    this.autoPainter = autoPainter; // Store the autoPainter instance
     this.templatesVersion = '1.0.0'; // Version of JSON schema
     this.userID = null; // The ID of the current user
     this.encodingBase = '!#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]^_`abcdefghijklmnopqrstuvwxyz{|}~'; // Characters to use for encoding/decoding
@@ -84,6 +89,13 @@ export default class TemplateManager {
 
     const pixelCountFormatted = new Intl.NumberFormat().format(template.pixelCount);
     this.overlay.handleDisplayStatus(`Template created at ${coords.join(', ')}! Total pixels: ${pixelCountFormatted}`);
+    
+    // Check if AutoPaint checkbox is enabled and start if it is.
+    // This is no longer auto-started here by default; it depends on UI state.
+    const autoPaintCheckbox = document.querySelector('#bm-input-autopaint');
+    if (autoPaintCheckbox && autoPaintCheckbox.checked) {
+        this.autoPainter?.start();
+    }
 
     await this.#storeTemplates();
   }
@@ -100,6 +112,7 @@ export default class TemplateManager {
    */
   importJSON(json) {
     if (json && json['whoami'] === 'BlueMarble') {
+      this.templatesJSON = json; // FIX: Assign the loaded JSON to the state variable
       this.#parseBlueMarble(json);
     }
   }
@@ -139,6 +152,13 @@ export default class TemplateManager {
           this.templatesArray.push(template);
         }
       }
+      
+      // If AutoPaint checkbox is enabled on reload, and templates are now loaded, start it.
+      // This is no longer auto-started here by default; it depends on UI state.
+      const autoPaintCheckbox = document.querySelector('#bm-input-autopaint');
+      if (autoPaintCheckbox && autoPaintCheckbox.checked) {
+          this.autoPainter?.start();
+      }
     }
   }
 
@@ -153,52 +173,10 @@ export default class TemplateManager {
   }
 
   /**
-   * MODIFIED: Analyzes all currently visible tiles to build the pixel queue on-demand.
-   * This function now completely overrides the existing pixel queue with a fresh analysis of visible tiles.
-   * @since MODIFIED
+   * --- REMOVED ---
+   * The analyzeVisibleTiles function has been removed. The logic for building the pixel queue
+   * is now handled just-in-time by ApiManager.executeQuickPaint, which fetches live tile data.
    */
-  async analyzeVisibleTiles() {
-    this.overlay.handleDisplayStatus('Analyzing visible tiles for quick paint...');
-    
-    // This new queue will contain all pixels that need painting from the visible tiles.
-    const newPixelQueue = [];
-
-    // Iterate through all the tiles currently visible and cached.
-    for (const [tileKey, tileBuffer] of this.tileCache.entries()) {
-        const tileCoords = tileKey.split(',').map(Number);
-        const tileBlob = new Blob([tileBuffer]);
-
-        // Find all template parts that apply to the current tile.
-        const templatesToDraw = this.templatesArray
-            .flatMap(template =>
-                Object.keys(template.chunked)
-                .filter(key => key.startsWith(tileCoords.map(c => c.toString().padStart(4, '0')).join(',')))
-                .map(key => {
-                    const coords = key.split(',');
-                    return {
-                        'bitmap': template.chunked[key],
-                        'pixelCoords': [coords[2], coords[3]]
-                    };
-                })
-            );
-
-        // If there are templates on this tile, analyze it for pixels to paint.
-        if (templatesToDraw.length > 0) {
-            const foundPixels = await this.analyzeTile(tileBlob, templatesToDraw, tileCoords);
-            // Add all the found pixels for this tile to our new queue.
-            newPixelQueue.push(...foundPixels);
-        }
-    }
-
-    // Replace the old pixel queue with the newly generated one.
-    // This fulfills the requirement to override the queue for updated tiles.
-    this.pixelQueue = newPixelQueue;
-    
-    // Update storage and UI with the new queue information.
-    this.updatePixelQueueAttribute();
-    this.updatePixelQueueCountUI();
-    this.overlay.handleDisplayStatus(`Analysis complete. ${this.pixelQueue.length} pixels in queue.`);
-  }
 
   /**
    * Analyzes a single tile and returns an array of pixels that need to be painted.
@@ -309,9 +287,11 @@ export default class TemplateManager {
                 } 
                 // Tier 3: Correcting an existing, but wrong, color.
                 else {
-                    // Perceptual difference is still used for *prioritization*
-                    const colorDiff = calculateColorDifference({ r: gameR, g: gameG, b: gameB }, { r: templateR, g: templateG, b: templateB });
-                    pixelData.priority = colorDiff + centerBonus;
+                    const MAX_PRIORITY_SCORE = 500000; // Max score for color difference to balance with centerBonus
+                    const colorDifference = calculateColorDifference({ r: gameR, g: gameG, b: gameB }, { r: templateR, g: templateG, b: templateB });
+                    // Normalize deltaE to a 0-1 scale (clamping at 100, which is a very large difference) and then scale to our priority range.
+                    const colorPriority = Math.min(colorDifference / 100.0, 1.0) * MAX_PRIORITY_SCORE;
+                    pixelData.priority = colorPriority + centerBonus;
                 }
             }
         }
@@ -368,23 +348,25 @@ export default class TemplateManager {
     }
   }
 
-  /**
-   * Draws all templates on the specified tile.
-   * This is now a lightweight function that only handles rendering, not analysis.
-   * @param {File} tileBlob - The pixels that are placed on a tile
-   * @param {Array<number>} tileCoords - The tile coordinates [x, y]
-   * @returns {Promise<Blob>} A promise resolving to the modified tile Blob.
+   /**
+   * Draws all templates on the specified tile, showing the overlay only on incorrect or empty pixels.
+   * This function provides the visual feedback to the user.
+   * @param {Blob} tileBlob - The original tile image blob from the game server.
+   * @param {Array<number>} tileCoords - The tile coordinates [x, y].
+   * @returns {Promise<Blob>} A promise resolving to the modified tile Blob with the selective overlay.
    * @since MODIFIED
    */
   async drawTemplateOnTile(tileBlob, tileCoords) {
-    // Cache the latest version of the tile for on-demand analysis
+    // Cache the latest version of the tile for on-demand analysis by other functions.
     const tileKey = tileCoords.join(',');
     this.tileCache.set(tileKey, await tileBlob.arrayBuffer());
 
+    // If templates are disabled, return the original tile immediately.
     if (!this.templatesShouldBeDrawn) {
         return tileBlob;
     }
     
+    // Find all template chunks that are located on the current tile.
     const formattedTileCoords = tileCoords[0].toString().padStart(4, '0') + ',' + tileCoords[1].toString().padStart(4, '0');
     const templatesToDraw = this.templatesArray
       .flatMap(template => 
@@ -394,36 +376,92 @@ export default class TemplateManager {
             const coords = tileKey.split(',');
             return {
               'bitmap': template.chunked[tileKey],
-              'pixelCoords': [coords[2], coords[3]]
+              'pixelCoords': [coords[2], coords[3]],
+              'sortID': template.sortID // Keep sortID for correct layering
             };
           })
       )
       .sort((a, b) => (a.sortID || 0) - (b.sortID || 0));
 
+    // If no templates are on this tile, return the original.
     if (templatesToDraw.length === 0) {
       return tileBlob;
     }
 
-    // Update UI without intensive calculations
-    const totalPixelsInView = this.templatesArray
-      .filter(template => Object.keys(template.chunked).some(tile => tile.startsWith(formattedTileCoords)))
-      .reduce((sum, template) => sum + (template.pixelCount || 0), 0);
-    const pixelCountFormatted = new Intl.NumberFormat().format(totalPixelsInView);
+    // Update the UI status with template information.
     this.overlay.handleDisplayStatus(
-      `Displaying ${templatesToDraw.length} template${templatesToDraw.length === 1 ? '' : 's'}.\nTotal pixels: ${pixelCountFormatted}`
+      `Displaying ${templatesToDraw.length} template${templatesToDraw.length === 1 ? '' : 's'}.`
     );
 
     const drawSize = this.tileSize * this.drawMult;
     const tileBitmap = await createImageBitmap(tileBlob);
-    const canvas = new OffscreenCanvas(drawSize, drawSize);
-    const context = canvas.getContext('2d');
-    context.imageSmoothingEnabled = false;
-    context.drawImage(tileBitmap, 0, 0, drawSize, drawSize);
 
+    // This is the main canvas we will work on and eventually return.
+    const finalCanvas = new OffscreenCanvas(drawSize, drawSize);
+    const finalCtx = finalCanvas.getContext('2d', { willReadFrequently: true });
+    finalCtx.imageSmoothingEnabled = false;
+
+    // Step 1: Draw the original game tile as the base layer.
+    finalCtx.drawImage(tileBitmap, 0, 0, drawSize, drawSize);
+
+    // Step 2: Get the pixel data of the game tile to compare against.
+    const gameImageData = finalCtx.getImageData(0, 0, drawSize, drawSize);
+    const gameData = gameImageData.data;
+
+    // Step 3: For each template, create a filtered version containing only the necessary pixels and draw it.
     for (const template of templatesToDraw) {
-      context.drawImage(template['bitmap'], Number(template['pixelCoords'][0]) * this.drawMult, Number(template['pixelCoords'][1]) * this.drawMult);
+      const tempW = template.bitmap.width;
+      const tempH = template.bitmap.height;
+      const offsetX = Number(template.pixelCoords[0]) * this.drawMult;
+      const offsetY = Number(template.pixelCoords[1]) * this.drawMult;
+
+      // Get the template's pixel data.
+      const tempCanvas = new OffscreenCanvas(tempW, tempH);
+      const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
+      tempCtx.drawImage(template.bitmap, 0, 0);
+      const templateImgData = tempCtx.getImageData(0, 0, tempW, tempH);
+      const tData = templateImgData.data;
+
+      // Iterate through each pixel of the template chunk.
+      for (let y = 0; y < tempH; y++) {
+        for (let x = 0; x < tempW; x++) {
+          const tIdx = (y * tempW + x) * 4;
+          const tAlpha = tData[tIdx + 3];
+
+          // We only care about visible pixels in the template overlay.
+          if (tAlpha > 128) {
+            const gX = x + offsetX;
+            const gY = y + offsetY;
+            
+            // Ensure we are within the bounds of the tile.
+            if (gX < drawSize && gY < drawSize) {
+              const gIdx = (gY * drawSize + gX) * 4;
+
+              const tR = tData[tIdx];
+              const tG = tData[tIdx + 1];
+              const tB = tData[tIdx + 2];
+
+              const gR = gameData[gIdx];
+              const gG = gameData[gIdx + 1];
+              const gB = gameData[gIdx + 2];
+              const gAlpha = gameData[gIdx + 3];
+
+              // If the game pixel is visible and its color already matches the template,
+              // make the corresponding template pixel transparent so it doesn't get drawn.
+              if (gAlpha > 128 && tR === gR && tG === gG && tB === gB) {
+                tData[tIdx + 3] = 0;
+              }
+            }
+          }
+        }
+      }
+
+      // Step 4: Apply the changes and draw the filtered template onto the final canvas.
+      tempCtx.putImageData(templateImgData, 0, 0);
+      finalCtx.drawImage(tempCanvas, offsetX, offsetY);
     }
     
-    return await canvas.convertToBlob({ type: 'image/png' });
+    // Step 5: Convert the final canvas to a blob and return it.
+    return await finalCanvas.convertToBlob({ type: 'image/png' });
   }
 }

@@ -1,3 +1,7 @@
+
+
+
+
 /** The overlay builder for the Blue Marble script.
  * @description This class handles the overlay UI for the Blue Marble script.
  * @class Overlay
@@ -36,6 +40,7 @@ export default class Overlay {
     this.version = version; // Version of userscript
 
     this.apiManager = null; // The API manager instance. Later populated when setApiManager is called
+    this.autoPainter = null; // The AutoPainter instance. Later populated when setAutoPainter is called
     
     this.outputStatusId = 'bm-output-status'; // ID for status element
 
@@ -49,6 +54,12 @@ export default class Overlay {
    * @since 0.41.4
    */
   setApiManager(apiManager) {this.apiManager = apiManager;}
+
+  /** Populates the autoPainter variable with the autoPainter class.
+   * @param {AutoPainter} autoPainter - The AutoPainter class instance
+   * @since 0.83.0 (New)
+   */
+  setAutoPainter(autoPainter) {this.autoPainter = autoPainter;}
 
   /** Creates an element.
    * For **internal use** of the {@link Overlay} class.
@@ -697,3 +708,10 @@ export default class Overlay {
     this.updateInnerHTML(this.outputStatusId, 'Error: ' + text, true); // Update output Status box
   }
 }
+
+
+
+
+
+
+

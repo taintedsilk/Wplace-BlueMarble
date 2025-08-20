@@ -1,3 +1,7 @@
+
+
+
+
 /* @since 0.5.1 */
 
 /* The entire overlay */
@@ -276,3 +280,10 @@ div:has(> #bm-input-file-template),
 #bm-overlay button:disabled {
   text-decoration: line-through;
 }
+
+
+
+
+
+
+
